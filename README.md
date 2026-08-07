@@ -91,6 +91,7 @@ See the setup guides for details:
 | `JAVA_HOME` | Path to JDK (falls back to IntelliJ's bundled JBR) |
 | `LSP_PORT` | TCP port for the daemon (default: 5007) |
 | `LSP_HEAP_SIZE` | JVM heap size (default: `4g`) |
+| `LSP_MAX_CONCURRENT_REQUESTS` | Max LSP request handlers running at once (default: quarter of CPU cores, min 2). Lower it if large files make the editor stall; raise it on a spare machine. |
 
 ## Architecture
 

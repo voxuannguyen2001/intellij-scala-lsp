@@ -12,6 +12,29 @@ import java.util
 import java.util.concurrent.{CompletableFuture, ExecutorService, Executors, LinkedBlockingQueue, ThreadFactory, ThreadPoolExecutor, TimeUnit}
 import scala.jdk.CollectionConverters.*
 
+object ScalaTextDocumentService:
+
+  /** Env var that overrides the request-handler concurrency cap (see resolveMaxConcurrentRequests). */
+  private val MaxConcurrentRequestsEnv = "LSP_MAX_CONCURRENT_REQUESTS"
+
+  /** Resolve the size (max concurrency) of the LSP request-handler thread pool.
+    *
+    * One editor interaction makes the client fire a burst of per-file requests (semanticTokens,
+    * inlayHint, codeLens, documentHighlight, foldingRange, documentSymbol, ...), each running a heavy
+    * analysis on its own handler thread (semanticTokens parses and builds the stub tree;
+    * inlayHint/highlight re-traverse the file). Run too many of these at once and they saturate every
+    * core, so each runs many times slower and the daemon appears to hang. The default caps concurrency
+    * to a QUARTER of the cores (min 2): it bounds the fan-out (excess requests queue) while leaving the
+    * rest of the cores for the analyses themselves. On a high-core machine a half-cores cap still lets
+    * enough full-file analyses run concurrently to stall the editor, which is why the default is a
+    * quarter rather than a half.
+    *
+    * Override via LSP_MAX_CONCURRENT_REQUESTS when a different cap suits the machine. A missing,
+    * non-numeric, or non-positive value falls back to the default rather than failing startup. */
+  def resolveMaxConcurrentRequests(envValue: Option[String], availableProcessors: Int): Int =
+    val default = math.max(2, availableProcessors / 4)
+    envValue.map(_.trim).filter(_.nonEmpty).flatMap(_.toIntOption).filter(_ > 0).getOrElse(default)
+
 // Handles all textDocument LSP requests by delegating to IntelliJ-backed providers.
 class ScalaTextDocumentService(projectManager: IntellijProjectManager, val diagnosticsProvider: DiagnosticsProvider) extends TextDocumentService:
 
@@ -20,16 +43,16 @@ class ScalaTextDocumentService(projectManager: IntellijProjectManager, val diagn
 
   // Dedicated, concurrency-capped thread pool for LSP request handlers. Using the common ForkJoinPool
   // causes deadlocks when threads block in smartReadAction (waiting for smart mode) or invokeAndWait
-  // (waiting for EDT). Parallelism is capped on purpose: one editor interaction makes the client fire a
-  // burst of per-file requests (semanticTokens, inlayHint, codeLens, documentHighlight, foldingRange,
-  // documentSymbol, ...), each running a heavy analysis on its own handler thread (semanticTokens parses
-  // and builds the stub tree; inlayHint/highlight re-traverse the file). With unbounded concurrency the
-  // burst fans out into many such analyses at once and saturates every core, so each runs many times
-  // slower and the daemon appears to hang. Capping to half the cores bounds the fan-out (excess requests
-  // queue) and leaves headroom for the rest of the system.
+  // (waiting for EDT). The pool size is capped on purpose — see
+  // ScalaTextDocumentService.resolveMaxConcurrentRequests for the rationale and the
+  // LSP_MAX_CONCURRENT_REQUESTS override.
   // allowCoreThreadTimeOut lets idle handlers die, so the pool doesn't leak across reconnects.
   // CallerRunsPolicy applies back-pressure (runs the task inline) once the queue also fills.
-  private val MaxConcurrentRequests: Int = math.max(2, Runtime.getRuntime.availableProcessors / 2)
+  private val MaxConcurrentRequests: Int =
+    ScalaTextDocumentService.resolveMaxConcurrentRequests(
+      Option(System.getenv(ScalaTextDocumentService.MaxConcurrentRequestsEnv)),
+      Runtime.getRuntime.availableProcessors
+    )
   private val lspExecutor: ExecutorService =
     val factory: ThreadFactory = r =>
       val t = Thread(r, "lsp-request-handler")
